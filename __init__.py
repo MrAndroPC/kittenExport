@@ -14,6 +14,7 @@ classes = (
     properties.EngineProperties,
     operators.OBJECT_OT_add_thruster,
     operators.OBJECT_OT_add_engine,
+    operators.OBJECT_OT_place_at_selection,
     ui.OBJECT_PT_thruster_panel,
     ui.OBJECT_PT_engine_panel,
     operators.OBJECT_OT_export_ksa_metadata,
@@ -40,6 +41,7 @@ def register():
 
     try:
         bpy.types.VIEW3D_MT_add.append(ui.menu_func)
+        bpy.types.VIEW3D_MT_mesh_add.append(ui.menu_func)
         bpy.types.TOPBAR_MT_file_export.append(ui.export_menu_func)
     except Exception:
         pass

@@ -75,8 +75,19 @@ class VIEW3D_MT_ksa_add(bpy.types.Menu):
 
     def draw(self, context):
         layout = self.layout
+        
+        # Object Mode Additions
         layout.operator("object.add_thruster", text="Thruster", icon='EMPTY_SINGLE_ARROW')
         layout.operator("object.add_engine", text="Engine", icon='CONE')
+        
+        layout.separator()
+        
+        # Edit Mode Additions (Only enabled if in Edit Mode)
+        op_t = layout.operator("object.place_at_selection", text="Thruster on Selection", icon='SNAP_FACE')
+        op_t.type = 'THRUSTER'
+        
+        op_e = layout.operator("object.place_at_selection", text="Engine on Selection", icon='SNAP_FACE')
+        op_e.type = 'ENGINE'
 
 def menu_func(self, context):
     self.layout.menu(VIEW3D_MT_ksa_add.bl_idname)

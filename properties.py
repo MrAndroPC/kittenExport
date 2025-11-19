@@ -19,7 +19,7 @@ class ThrusterProperties(bpy.types.PropertyGroup):
     specific_impulse_seconds: bpy.props.FloatProperty(
         name="Specific impulse seconds",
         description="Isp in seconds",
-        default=0.0,
+        default=220.0,
         min=0.00,
     )
     
@@ -39,7 +39,7 @@ class ThrusterProperties(bpy.types.PropertyGroup):
     sound_event_on: bpy.props.StringProperty(
         name="Sound event on",
         description="",
-        default="DefaultRcdThruster"
+        default="DefaultRcsThruster"
     )
     
     control_map_translation: bpy.props.BoolVectorProperty(

@@ -1,5 +1,6 @@
 import json
 import math
+import mathutils
 import xml.etree.ElementTree as ET
 
 def _safe_vector_to_list(vec_prop):
@@ -32,19 +33,21 @@ def _thruster_dict_to_xml_element(parent, thruster_data):
         ET.SubElement(thruster, 'Location', X=str(final_loc[0]), Y=str(final_loc[1]), Z=str(final_loc[2]))
 
     # ExhaustDirection
-    rotation = thruster_data.get('rotation', [0.0, 0.0, 0.0])
+    rotation = thruster_data.get('rotation', [0.0, 0.0, 0.0])  # Euler angles in radians (x, y, z)
+
     if rotation:
-        cos_y = math.cos(rotation[1])
-        sin_y = math.sin(rotation[1])
-        cos_z = math.cos(rotation[2])
-        sin_z = math.sin(rotation[2])
-        
-        ex_dir = [
-            cos_y * cos_z,
-            cos_y * sin_z,
-            sin_y
-        ]
+        try:
+            eul = mathutils.Euler(rotation, 'XYZ')
+            # Rotate local +Z to world space
+            dir_vec = eul.to_matrix() @ mathutils.Vector((0.0, 0.0, 1.0))
+            if dir_vec.length_squared > 0.0:
+                dir_vec.normalize()
+            ex_dir = [dir_vec.x, dir_vec.y, dir_vec.z]
+        except Exception:
+            # Fallback if mathutils is not available for some reason
+            ex_dir = [1.0, 0.0, 0.0]
     else:
+        # Default: forward in your KSA system
         ex_dir = [1.0, 0.0, 0.0]
 
     ET.SubElement(thruster, 'ExhaustDirection', X=str(ex_dir[0]), Y=str(ex_dir[1]), Z=str(ex_dir[2]))

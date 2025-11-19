@@ -1,5 +1,7 @@
 import bpy
+import bmesh
 import math
+import mathutils
 import os
 import xml.etree.ElementTree as ET
 from .utils import (
@@ -7,6 +9,124 @@ from .utils import (
     thrusters_list_to_xml_str, engines_list_to_xml_str, meta_dict_to_xml_str,
     parse_meta_string
 )
+
+class OBJECT_OT_place_at_selection(bpy.types.Operator):
+    bl_idname = "object.place_at_selection"
+    bl_label = "Place KSA Object at Selection"
+    bl_description = "Place a Thruster or Engine at the center of selected vertices, aligned to their normal"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    type: bpy.props.EnumProperty(
+        items=[
+            ('THRUSTER', "Thruster", "Add a Thruster"),
+            ('ENGINE', "Engine", "Add an Engine"),
+        ],
+        name="Type",
+        default='THRUSTER',
+    )
+
+    flip_normal: bpy.props.BoolProperty(
+        name="Flip Direction",
+        description="Invert the calculated normal direction",
+        default=False,
+    )
+
+    @classmethod
+    def poll(cls, context):
+        # Only allow in Edit Mode with an active mesh object
+        return (context.mode == 'EDIT_MESH' and 
+                context.object and 
+                context.object.type == 'MESH')
+
+    def execute(self, context):
+        obj = context.object
+        mw = obj.matrix_world
+        mesh = obj.data
+        
+        # 1. Get Geometry from Edit Mode
+        bm = bmesh.from_edit_mesh(mesh)
+        selected_verts = [v for v in bm.verts if v.select]
+
+        # 2. Validation
+        if len(selected_verts) < 3:
+            self.report({'ERROR'}, "Select at least 3 vertices to define a plane/ring.")
+            return {'CANCELLED'}
+
+        # 3. Calculate Center and Normal
+        world_coords = [mw @ v.co for v in selected_verts]
+        
+        # Center is the average position
+        center = sum(world_coords, mathutils.Vector()) / len(world_coords)
+        
+        # Calculate normal using Blender's internal robust method
+        normal = mathutils.geometry.normal(world_coords)
+        
+        # Fallback for degenerate geometry (collinear points)
+        if normal.length_squared < 1e-6:
+            self.report({'ERROR'}, "Selection is collinear or degenerate; cannot calculate normal.")
+            return {'CANCELLED'}
+            
+        # Check planarity (Standard Deviation of distance to plane)
+        # Plane equation: normal . (p - center) = 0
+        distances = [abs(normal.dot(p - center)) for p in world_coords]
+        avg_deviation = sum(distances) / len(distances)
+        
+        if avg_deviation > 0.1: # Threshold in meters (adjust as needed)
+            self.report({'WARNING'}, f"Selection is not planar (Avg Dev: {avg_deviation:.3f}m). Result might be inaccurate.")
+
+        normal = -normal
+
+        # 4. Switch to Object Mode to add the new object
+        bpy.ops.object.mode_set(mode='OBJECT')
+
+        # 5. Add the specific object type
+        if self.type == 'THRUSTER':
+            bpy.ops.object.add_thruster()
+        else:
+            bpy.ops.object.add_engine()
+            
+        new_obj = context.active_object
+        
+        # 6. Apply Transform
+        new_obj.location = center
+        
+        # We want the object's local X axis (Exhaust) to point along the Normal.
+        # 'Z' is the "Up" axis which we don't care about as much, but we need it stable.
+        
+        # Method: Construct a rotation matrix directly from the normal
+        # If the normal is (0,0,1), we want local X to be (0,0,1).
+        
+        # Create a rotation that aligns the TRACK axis (X) to the vector (normal)
+        rot_quat = normal.to_track_quat('X', 'Z')
+        
+        # If the previous code resulted in it lying flat, it means the object's 
+        # internal geometry might be oriented along Z or Y, but we are aligning X.
+        # However, assuming your Thruster empty is an arrow pointing +X or +Z:
+        
+        # FIX: If the object looks "aligned with the plane", it usually means 
+        # we aligned the wrong local axis to the normal.
+        
+        # Let's try aligning the object's Z axis to the normal instead, 
+        # or forcing the alignment more explicitly.
+        
+        # If your thruster visual (Arrow) points up (Z), use 'Z'.
+        # If your thruster visual (Arrow) points forward (X), use 'X'.
+        
+        # Assuming your Empty displays as an Arrow pointing +Z (Blender default):
+        # transform so Local Z matches Normal.
+        
+        # Re-evaluating based on your comment: 
+        # "Aligned with vertices plane" means it is 90 degrees off.
+        # If you used 'X' before and it laid flat, maybe the visual arrow is Z?
+        
+        # Let's align the Z-axis to the normal (Standard Blender "Up").
+        rot_quat = normal.to_track_quat('Z', 'X')
+        
+        new_obj.rotation_euler = rot_quat.to_euler()
+
+        self.report({'INFO'}, f"Placed {self.type} at selection center.")
+        return {'FINISHED'}
+# --- Existing Operators Below (Unchanged) ---
 
 class OBJECT_OT_export_ksa_metadata(bpy.types.Operator):
     bl_idname = "export_scene.ksa_metadata"
@@ -40,7 +160,6 @@ class OBJECT_OT_export_ksa_metadata(bpy.types.Operator):
             self.report({'ERROR'}, "No scene found")
             return {'CANCELLED'}
 
-        # Collect all thrusters
         thrusters = []
         for obj in scene.objects:
             if obj.get('_is_thruster') is None and not obj.name.startswith('Thruster'):
@@ -65,7 +184,6 @@ class OBJECT_OT_export_ksa_metadata(bpy.types.Operator):
             }
             thrusters.append(entry)
 
-        # Collect all engines
         engines = []
         for obj in scene.objects:
             if obj.get('_is_engine') is None and not obj.name.startswith('Engine'):
@@ -118,27 +236,23 @@ class OBJECT_OT_add_thruster(bpy.types.Operator):
             context.collection.objects.link(obj)
         except Exception:
             pass
-
         try:
             obj.empty_display_type = 'SINGLE_ARROW'
             obj.empty_display_size = 0.3
             obj.rotation_euler = (0, -math.pi / 2, 0)
         except Exception:
             pass
-
         try:
             obj['_is_thruster'] = True
             obj['_no_export'] = True
         except Exception:
             pass
-
         try:
             bpy.ops.object.select_all(action='DESELECT')
             obj.select_set(True)
             context.view_layer.objects.active = obj
         except Exception:
             pass
-
         return {'FINISHED'}
 
 class OBJECT_OT_add_engine(bpy.types.Operator):
@@ -153,27 +267,23 @@ class OBJECT_OT_add_engine(bpy.types.Operator):
             context.collection.objects.link(obj)
         except Exception:
             pass
-
         try:
             obj.empty_display_type = 'CONE'
             obj.empty_display_size = 0.5
             obj.rotation_euler = (0, -math.pi / 2, 0)
         except Exception:
             pass
-
         try:
             obj['_is_engine'] = True
             obj['_no_export'] = True
         except Exception:
             pass
-
         try:
             bpy.ops.object.select_all(action='DESELECT')
             obj.select_set(True)
             context.view_layer.objects.active = obj
         except Exception:
             pass
-
         return {'FINISHED'}
 
 class OBJECT_OT_export_thrusters_OLD(bpy.types.Operator):
@@ -200,7 +310,6 @@ class OBJECT_OT_export_thrusters_OLD(bpy.types.Operator):
             kp = getattr(obj, 'thruster_props', None)
             if kp is None or not getattr(kp, 'exportable', False):
                 continue
-
             entry = {
                 'name': getattr(obj, 'name', ''),
                 'location': list(obj.location) if obj.location is not None else None,
@@ -216,9 +325,7 @@ class OBJECT_OT_export_thrusters_OLD(bpy.types.Operator):
                 'exportable': kp.exportable,
             }
             data.append(entry)
-
         xml_text = thrusters_list_to_xml_str(data)
-        
         if getattr(self, 'filepath', ''):
             try:
                 path = self.filepath
@@ -233,7 +340,6 @@ class OBJECT_OT_export_thrusters_OLD(bpy.types.Operator):
         else:
             print("Thruster export (XML):\n", xml_text)
             self.report({'INFO'}, f"Prepared export for {len(data)} objects (printed to console)")
-        
         return {'FINISHED'}
 
 class OBJECT_OT_bake_thruster_meta(bpy.types.Operator):
@@ -246,7 +352,6 @@ class OBJECT_OT_bake_thruster_meta(bpy.types.Operator):
         for obj in getattr(context, 'selected_objects', []):
             kp = getattr(obj, 'thruster_props', None)
             if kp is None: continue
-            
             try:
                 meta = {
                     'name': obj.name,
@@ -265,7 +370,6 @@ class OBJECT_OT_bake_thruster_meta(bpy.types.Operator):
                 count += 1
             except Exception:
                 pass
-        
         self.report({'INFO'}, f"Baked metadata for {count} objects")
         return {'FINISHED'}
 
@@ -293,7 +397,6 @@ class OBJECT_OT_export_engines(bpy.types.Operator):
             ep = getattr(obj, 'engine_props', None)
             if ep is None or not getattr(ep, 'exportable', False):
                 continue
-
             entry = {
                 'name': getattr(obj, 'name', ''),
                 'location': list(obj.location) if obj.location is not None else None,
@@ -306,7 +409,6 @@ class OBJECT_OT_export_engines(bpy.types.Operator):
                 'exportable': ep.exportable,
             }
             data.append(entry)
-
         xml_text = engines_list_to_xml_str(data)
         if getattr(self, 'filepath', ''):
             try:
@@ -334,7 +436,6 @@ class OBJECT_OT_bake_engine_meta(bpy.types.Operator):
         for obj in getattr(context, 'selected_objects', []):
             ep = getattr(obj, 'engine_props', None)
             if ep is None: continue
-
             try:
                 meta = {
                     'name': obj.name,
@@ -351,7 +452,6 @@ class OBJECT_OT_bake_engine_meta(bpy.types.Operator):
                 count += 1
             except Exception:
                 pass
-
         self.report({'INFO'}, f"Baked engine metadata for {count} objects")
         return {'FINISHED'}
 
@@ -379,32 +479,25 @@ class OBJECT_OT_export_glb_with_meta(bpy.types.Operator):
         if scene is None:
             self.report({'ERROR'}, "No scene found")
             return {'CANCELLED'}
-
         thrusters = [o for o in scene.objects if (o.get('_thruster_meta') is not None) or (getattr(o, 'thruster_props', None) is not None)]
         non_thrusters = [o for o in scene.objects if o not in thrusters]
-        
         prev_selected = [o for o in context.selected_objects]
         prev_active = getattr(context.view_layer, 'objects', None) and context.view_layer.objects.active
-
         try:
             try:
                 bpy.ops.object.select_all(action='DESELECT')
             except Exception: pass
-            
             for o in non_thrusters:
                 try: o.select_set(True)
                 except Exception: pass
-            
             if non_thrusters:
                 try: context.view_layer.objects.active = non_thrusters[0]
                 except Exception: pass
-
             try:
                 bpy.ops.export_scene.gltf(filepath=self.filepath, export_format='GLB', use_selection=True)
             except Exception as e:
                 self.report({'ERROR'}, f"GLB export failed: {e}")
                 return {'CANCELLED'}
-
             meta_list = []
             for o in thrusters:
                 jm = o.get('_thruster_meta')
@@ -416,7 +509,6 @@ class OBJECT_OT_export_glb_with_meta(bpy.types.Operator):
                     elif isinstance(parsed, list):
                         meta_list.extend(parsed)
                         continue
-                
                 kp = getattr(o, 'thruster_props', None)
                 if kp is not None:
                     entry = {
@@ -432,7 +524,6 @@ class OBJECT_OT_export_glb_with_meta(bpy.types.Operator):
                         'location': list(o.location) if o.location is not None else None,
                     }
                     meta_list.append(entry)
-
             base = os.path.splitext(self.filepath)[0]
             meta_path = base + '_meta.xml'
             try:
@@ -442,18 +533,14 @@ class OBJECT_OT_export_glb_with_meta(bpy.types.Operator):
             except Exception as e:
                 self.report({'WARNING'}, f"GLB exported but failed to write meta file: {e}")
                 return {'FINISHED'}
-
             self.report({'INFO'}, f"Exported GLB and wrote {len(meta_list)} metadata entries to {meta_path}")
             return {'FINISHED'}
-
         finally:
             try: bpy.ops.object.select_all(action='DESELECT')
             except Exception: pass
-            
             for o in prev_selected:
                 try: o.select_set(True)
                 except Exception: pass
-            
             try:
                 if prev_active is not None:
                     context.view_layer.objects.active = prev_active

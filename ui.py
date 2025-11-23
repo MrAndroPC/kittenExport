@@ -93,4 +93,4 @@ def menu_func(self, context):
     self.layout.menu(VIEW3D_MT_ksa_add.bl_idname)
 
 def export_menu_func(self, context):
-    self.layout.operator("export_scene.ksa_metadata", text="KSA Metadata (.xml)")
+    self.layout.operator("export_scene.ksa_metadata", text="KSA Part")

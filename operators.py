@@ -7,7 +7,7 @@ import xml.etree.ElementTree as ET
 from .utils import (
     _safe_vector_to_list, _thruster_dict_to_xml_element, _engine_dict_to_xml_element,
     thrusters_list_to_xml_str, engines_list_to_xml_str, meta_dict_to_xml_str,
-    parse_meta_string
+    parse_meta_string, sanitize_filename, _extract_material_maps, _indent_xml
 )
 
 class OBJECT_OT_place_at_selection(bpy.types.Operator):
@@ -130,29 +130,40 @@ class OBJECT_OT_place_at_selection(bpy.types.Operator):
 
 class OBJECT_OT_export_ksa_metadata(bpy.types.Operator):
     bl_idname = "export_scene.ksa_metadata"
-    bl_label = "Export KSA Metadata"
-    bl_description = "Export all thrusters and engines to KSA XML format"
+    bl_label = "Export KSA Part"
+    bl_description = "Export thrusters, engines, meshes, materials into part.xml with Meshes/ and Textures/ subfolders"
     bl_options = {'REGISTER'}
     
     filepath: bpy.props.StringProperty(
-        name="Filepath",
-        description="Where to write the XML export",
+        name="Directory",
+        description="Target directory. part.xml plus Meshes/ and Textures/ will be created inside it.",
         default="",
-        subtype='FILE_PATH',
+        subtype='DIR_PATH',
     )
     
     filter_glob: bpy.props.StringProperty(
-        default="*.xml",
+        default="*",
         options={'HIDDEN'},
+    )
+    part_id: bpy.props.StringProperty(
+        name="Part ID",
+        description="Identifier used for the <Part Id=...> element in the XML",
+        default="MyRocket",
     )
 
     def invoke(self, context, event):
         try:
-            self.filepath = "ksa_metadata.xml"
+            # Suggest current working directory; user picks folder
+            self.filepath = bpy.path.abspath('//') if hasattr(bpy.path, 'abspath') else ""
             context.window_manager.fileselect_add(self)
             return {'RUNNING_MODAL'}
         except Exception:
             return self.execute(context)
+
+    def draw(self, context):
+        """Draw custom properties in the file selector dialog."""
+        layout = self.layout
+        layout.prop(self, "part_id")
 
     def execute(self, context):
         scene = getattr(context, 'scene', None)
@@ -160,6 +171,7 @@ class OBJECT_OT_export_ksa_metadata(bpy.types.Operator):
             self.report({'ERROR'}, "No scene found")
             return {'CANCELLED'}
 
+        # Collect thrusters
         thrusters = []
         for obj in scene.objects:
             if obj.get('_is_thruster') is None and not obj.name.startswith('Thruster'):
@@ -184,6 +196,7 @@ class OBJECT_OT_export_ksa_metadata(bpy.types.Operator):
             }
             thrusters.append(entry)
 
+        # Collect engines
         engines = []
         for obj in scene.objects:
             if obj.get('_is_engine') is None and not obj.name.startswith('Engine'):
@@ -205,21 +218,207 @@ class OBJECT_OT_export_ksa_metadata(bpy.types.Operator):
             }
             engines.append(entry)
 
-        root = ET.Element('KSAMetadata')
-        for thruster_data in thrusters:
-            _thruster_dict_to_xml_element(root, thruster_data)
-        for engine_data in engines:
-            _engine_dict_to_xml_element(root, engine_data)
-
-        xml_text = ET.tostring(root, encoding='utf-8').decode('utf-8')
-
+        # Determine base directory
+        import os
+        base_dir = self.filepath if os.path.isdir(self.filepath) else (os.path.dirname(self.filepath) if self.filepath else os.getcwd())
+        if not base_dir:
+            base_dir = os.getcwd()
+        # Ensure directory exists
         try:
-            with open(self.filepath, 'w', encoding='utf-8') as f:
-                f.write('\n')
+            os.makedirs(base_dir, exist_ok=True)
+        except Exception:
+            pass
+        meshes_dir = os.path.join(base_dir, 'Meshes')
+        textures_dir = os.path.join(base_dir, 'Textures')
+        try:
+            os.makedirs(meshes_dir, exist_ok=True)
+        except Exception:
+            meshes_dir = base_dir
+        try:
+            os.makedirs(textures_dir, exist_ok=True)
+        except Exception:
+            textures_dir = None
+
+        # Collect mesh objects (exclude thrusters/engines/_no_export)
+        mesh_objects = []
+        for obj in scene.objects:
+            if getattr(obj, 'type', '') != 'MESH':
+                continue
+            if obj.get('_no_export') or obj.get('_is_thruster') or obj.get('_is_engine'):
+                continue
+            mesh_objects.append(obj)
+
+        # Unique filenames for meshes
+        used_names = set()
+        mesh_export_info = []  # (obj, glb_path, mesh_id)
+        for obj in mesh_objects:
+            safe_name = sanitize_filename(obj.name) or 'mesh'
+            candidate = safe_name
+            idx = 1
+            while candidate.lower() in used_names:
+                candidate = f"{safe_name}_{idx}"
+                idx += 1
+            used_names.add(candidate.lower())
+            mesh_file_name = f"{candidate}.glb"
+            glb_path = os.path.join(meshes_dir, mesh_file_name)
+            mesh_id = f"{candidate}MeshFile"  # append MeshFile suffix for ID uniqueness
+            mesh_export_info.append((obj, glb_path, mesh_file_name, mesh_id))
+
+        # Preserve selection
+        prev_selected = [o for o in getattr(context, 'selected_objects', [])]
+        prev_active = getattr(context.view_layer.objects, 'active', None)
+
+        exported_mesh_count = 0
+        for obj, path, _, _ in mesh_export_info:
+            try:
+                bpy.ops.object.select_all(action='DESELECT')
+            except Exception:
+                pass
+            try:
+                obj.select_set(True)
+                context.view_layer.objects.active = obj
+            except Exception:
+                continue
+            try:
+                bpy.ops.export_scene.gltf(filepath=path, export_format='GLB', use_selection=True)
+                exported_mesh_count += 1
+            except Exception:
+                continue
+
+        # Restore selection
+        try:
+            bpy.ops.object.select_all(action='DESELECT')
+        except Exception:
+            pass
+        for o in prev_selected:
+            try:
+                o.select_set(True)
+            except Exception:
+                pass
+        try:
+            if prev_active is not None:
+                context.view_layer.objects.active = prev_active
+        except Exception:
+            pass
+
+        # Collect materials used by mesh objects
+        materials = set()
+        for obj in mesh_objects:
+            for slot in getattr(obj, 'material_slots', []) or []:
+                mat = getattr(slot, 'material', None)
+                if mat is not None:
+                    materials.add(mat)
+
+        # Build material maps and export texture files (PNG) with suffixes
+        material_infos = []  # (mat, maps_dict, material_id)
+        exported_texture_count = 0
+        for mat in materials:
+            maps = _extract_material_maps(mat)
+            if not maps:
+                # still include material without textures
+                material_id = f"{sanitize_filename(mat.name)}TextureFile" if mat.name else 'MaterialTextureFile'
+                material_infos.append((mat, maps, material_id))
+                continue
+            material_id = f"{sanitize_filename(mat.name)}TextureFile" if mat.name else 'MaterialTextureFile'
+            # Export each identified map under standardized filenames
+            for key, img in maps.items():
+                if textures_dir is None or img is None:
+                    continue
+                suffix = 'Diffuse' if key == 'diffuse' else ('Normal' if key == 'normal' else 'RoughMetaAo')
+                file_name = f"{sanitize_filename(mat.name)}_{suffix}.png" if mat.name else f"material_{suffix}.png"
+                out_path = os.path.join(textures_dir, file_name)
+                if not os.path.exists(out_path):
+                    saved = False
+                    try:
+                        if hasattr(img, 'save_render'):
+                            img.save_render(out_path)
+                            saved = True
+                        elif hasattr(img, 'save'):  # try original or direct save
+                            if hasattr(img, 'filepath_raw') and img.filepath_raw and os.path.exists(img.filepath_raw):
+                                import shutil
+                                shutil.copy2(img.filepath_raw, out_path)
+                                saved = True
+                            if not saved:
+                                img.save(out_path)
+                                saved = True
+                    except Exception:
+                        saved = False
+                    if not saved:
+                        try:
+                            src_fallback = getattr(img, 'filepath', '') or getattr(img, 'filepath_raw', '')
+                            if src_fallback and os.path.exists(src_fallback):
+                                import shutil
+                                shutil.copy2(src_fallback, out_path)
+                                saved = True
+                        except Exception:
+                            pass
+                    if saved:
+                        exported_texture_count += 1
+            material_infos.append((mat, maps, material_id))
+
+        # Construct new XML structure
+        root = ET.Element('Assets')  # top-level container
+
+        # MeshFile entries
+        for obj, _, mesh_file_name, mesh_id in mesh_export_info:
+            ET.SubElement(root, 'MeshFile', Id=obj.name + 'MeshFile', Path=f"Meshes/{mesh_file_name}", Category='Vessel')
+
+        # PbrMaterial entries
+        for mat, maps, material_id in material_infos:
+            mat_elem = ET.SubElement(root, 'PbrMaterial', Id=material_id)
+            # Diffuse
+            if 'diffuse' in maps and textures_dir:
+                diffuse_file = f"{sanitize_filename(mat.name)}_Diffuse.png"
+                ET.SubElement(mat_elem, 'Diffuse', Path=f"Textures/{diffuse_file}", Category='Vessel')
+            # Normal
+            if 'normal' in maps and textures_dir:
+                normal_file = f"{sanitize_filename(mat.name)}_Normal.png"
+                ET.SubElement(mat_elem, 'Normal', Path=f"Textures/{normal_file}", Category='Vessel')
+            # RoughMetaAo
+            if 'roughmetaao' in maps and textures_dir:
+                rma_file = f"{sanitize_filename(mat.name)}_RoughMetaAo.png"
+                ET.SubElement(mat_elem, 'RoughMetaAo', Path=f"Textures/{rma_file}", Category='Vessel')
+
+        # Part block (single vessel part). Use user-specified part_id or fallback
+        part_id = sanitize_filename(self.part_id) or 'Vessel'
+        part_elem = ET.SubElement(root, 'Part', Id=part_id)
+
+        # Add mesh subparts
+        for obj, _, mesh_file_name, mesh_id in mesh_export_info:
+            sub_part = ET.SubElement(part_elem, 'SubPart', Id=obj.name)
+            sp_model = ET.SubElement(sub_part, 'SubPartModel', Id=f"{sanitize_filename(obj.name)}Model")
+            # Mesh reference
+            ET.SubElement(sp_model, 'Mesh', Id=obj.name + 'MeshFile')
+            # Choose first material slot's material id if exists
+            first_mat = None
+            for slot in getattr(obj, 'material_slots', []) or []:
+                m = getattr(slot, 'material', None)
+                if m is not None:
+                    first_mat = m
+                    break
+            if first_mat is not None:
+                mat_id = f"{sanitize_filename(first_mat.name)}TextureFile"
+                ET.SubElement(sp_model, 'Material', Id=mat_id)
+
+        # Add thruster subparts
+        for thruster_data in thrusters:
+            # Previously each thruster was wrapped in a SubPart; now we place it directly under Part.
+            _thruster_dict_to_xml_element(part_elem, thruster_data)
+        # Add engines directly under Part (no SubPart wrapper)
+        for engine_data in engines:
+            _engine_dict_to_xml_element(part_elem, engine_data)
+
+        # Serialize XML (pretty + CRLF)
+        _indent_xml(root)
+        xml_text = ET.tostring(root, encoding='utf-8').decode('utf-8').replace('\n', '\r\n')
+        xml_out_path = os.path.join(base_dir, 'part.xml')
+        try:
+            with open(xml_out_path, 'w', encoding='utf-8') as f:
+                f.write('<?xml version="1.0" encoding="utf-8"?>\r\n')
                 f.write(xml_text)
-            self.report({'INFO'}, f"Exported {len(thrusters)} thrusters and {len(engines)} engines to {self.filepath}")
+            self.report({'INFO'}, f"Exported {exported_mesh_count} meshes, {len(material_infos)} materials, {len(thrusters)} thrusters, {len(engines)} engines. XML: {xml_out_path}")
         except Exception as e:
-            self.report({'ERROR'}, f"Export failed: {e}")
+            self.report({'ERROR'}, f"XML write failed: {e}")
             return {'CANCELLED'}
 
         return {'FINISHED'}
